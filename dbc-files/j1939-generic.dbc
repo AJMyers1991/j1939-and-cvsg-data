@@ -1,0 +1,115 @@
+VERSION ""
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: Vector__XXX
+
+BO_ 217056256 EEC1: 8 Vector__XXX
+ SG_ DriverDemandTorque : 8|8@1+ (1,-125) [-125|130] "%" Vector__XXX
+ SG_ ActualEngTorque : 16|8@1+ (1,-125) [-125|130] "%" Vector__XXX
+ SG_ EngineSpeed : 24|16@1+ (0.125,0) [0|8191.875] "rpm" Vector__XXX
+
+BO_ 217056000 EEC2: 8 Vector__XXX
+ SG_ EngineLoad : 16|8@1+ (1,0) [0|255] "%" Vector__XXX
+
+BO_ 419361024 CCVS: 8 Vector__XXX
+ SG_ VehicleSpeed : 8|16@1+ (0.002427,0) [0|159.053445] "mph" Vector__XXX
+
+BO_ 419361280 LFE: 8 Vector__XXX
+ SG_ FuelRate : 0|8@1+ (0.013208571,0) [0|3.368185605] "gal/h" Vector__XXX
+
+BO_ 419360256 ET1: 8 Vector__XXX
+ SG_ CoolantTemp : 0|8@1+ (1.8,-40) [-40|419] "degF" Vector__XXX
+ SG_ FuelTemp : 8|8@1+ (1.8,-40) [-40|419] "degF" Vector__XXX
+
+BO_ 419357952 EHR: 8 Vector__XXX
+ SG_ EngineHours : 0|32@1+ (0.05,0) [0|214748364.75] "hr" Vector__XXX
+
+BO_ 419348736 HRVD: 8 Vector__XXX
+ SG_ Odometer : 0|32@1+ (0.003106855961,0) [0|13339498] "mi" Vector__XXX
+
+BO_ 419362304 IC1: 8 Vector__XXX
+ SG_ BoostPressure : 8|8@1+ (0.145038,0) [0|36.98469] "psi_abs" Vector__XXX
+
+BO_ 419362560 Voltage: 8 Vector__XXX
+ SG_ BatteryVoltage : 32|16@1+ (0.05,0) [0|3276.75] "V" Vector__XXX
+
+CM_ BO_ 217056256 "PGN 61444: Electronic Engine Controller 1";
+CM_ SG_ 217056256 DriverDemandTorque "SPN 512";
+CM_ SG_ 217056256 ActualEngTorque "SPN 513";
+CM_ SG_ 217056256 EngineSpeed "SPN 190";
+CM_ BO_ 217056000 "PGN 61443: Electronic Engine Controller 2";
+CM_ SG_ 217056000 EngineLoad "SPN 92";
+CM_ BO_ 419361024 "PGN 65265: Cruise Control / Vehicle Speed";
+CM_ SG_ 419361024 VehicleSpeed "SPN 84 — 1/256 km/h × 0.621371";
+CM_ BO_ 419361280 "PGN 65266: Fuel Economy";
+CM_ SG_ 419361280 FuelRate "SPN 183 — 0.05 L/h × 0.264172";
+CM_ BO_ 419360256 "PGN 65262: Engine Temperature 1";
+CM_ SG_ 419360256 CoolantTemp "SPN 110 — 1°C/bit, −40°C offset";
+CM_ SG_ 419360256 FuelTemp "SPN 174 — 1°C/bit, −40°C offset";
+CM_ BO_ 419357952 "PGN 65253: Engine Hours";
+CM_ SG_ 419357952 EngineHours "SPN 247 — 0.05 h/bit";
+CM_ BO_ 419348736 "PGN 65217: High Resolution Vehicle Distance";
+CM_ SG_ 419348736 Odometer "SPN 245 — 5 m/bit / 1609.344";
+CM_ BO_ 419362304 "PGN 65270: Intake / Exhaust Conditions 1";
+CM_ SG_ 419362304 BoostPressure "SPN 102 — 1 kPa/bit; gauge = value − 14.7";
+CM_ BO_ 419362560 "PGN 65271: Electrical System Voltage";
+CM_ SG_ 419362560 BatteryVoltage "SPN 158 — 16-bit LE, 0.05 V/bit";
+
+BA_DEF_ SG_  "SPN" INT 0 524287;
+BA_DEF_ BO_  "VFrameFormat" ENUM  "StandardCAN","ExtendedCAN","reserved","J1939PG";
+BA_DEF_  "ProtocolType" STRING ;
+BA_DEF_  "BusType" STRING ;
+
+BA_DEF_DEF_  "SPN" 0;
+BA_DEF_DEF_  "VFrameFormat" "J1939PG";
+BA_DEF_DEF_  "ProtocolType" "J1939";
+BA_DEF_DEF_  "BusType" "CAN";
+
+BA_ "ProtocolType" "J1939";
+BA_ "BusType" "CAN";
+
+BA_ "VFrameFormat" BO_ 217056256 3;
+BA_ "VFrameFormat" BO_ 217056000 3;
+BA_ "VFrameFormat" BO_ 419361024 3;
+BA_ "VFrameFormat" BO_ 419361280 3;
+BA_ "VFrameFormat" BO_ 419360256 3;
+BA_ "VFrameFormat" BO_ 419357952 3;
+BA_ "VFrameFormat" BO_ 419348736 3;
+BA_ "VFrameFormat" BO_ 419362304 3;
+BA_ "VFrameFormat" BO_ 419362560 3;
+
+CM_ "j1939_generic.dbc — Universal J1939 signals. Works on ANY J1939 diesel truck.";
+CM_ "All signals engine ECU SA 0x00 per SAE J1939-71. Body signals OEM-specific, not included.";
+CM_ "For Kenworth T660 Cat C15, use kenworth_custom.dbc for BCM SA 0x31 signals.";
+CM_ "Oil pressure omitted — Cat C15 uses byte 4 (proprietary), not byte 3 (standard).";

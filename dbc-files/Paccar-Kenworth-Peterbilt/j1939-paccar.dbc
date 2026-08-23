@@ -1,0 +1,141 @@
+VERSION ""
+
+NS_ : 
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: Vector__XXX
+
+BO_ 217056256 EEC1: 8 Vector__XXX
+ SG_ DriverDemandTorque : 8|8@1+ (1,-125) [-125|125] "%" Vector__XXX
+ SG_ ActualEngTorque : 16|8@1+ (1,-125) [-125|125] "%" Vector__XXX
+ SG_ EngineSpeed : 24|16@1+ (0.125,0) [0|8031.875] "rpm" Vector__XXX
+ SG_ EngDemandTorque : 56|8@1+ (1,-125) [-125|125] "%" Vector__XXX
+
+BO_ 217056000 EEC2: 8 Vector__XXX
+ SG_ EngineLoad : 16|8@1+ (1,0) [0|125] "%" Vector__XXX
+
+BO_ 419361024 CCVS: 8 Vector__XXX
+ SG_ VehicleSpeed : 8|16@1+ (0.002427,0) [0|155.34] "mph" Vector__XXX
+
+BO_ 419361280 LFE: 8 Vector__XXX
+ SG_ FuelRate : 0|8@1+ (0.013209,0) [0|3.368] "gal/h" Vector__XXX
+
+BO_ 419360256 ET1: 8 Vector__XXX
+ SG_ CoolantTemp : 0|8@1+ (1.8,-40) [-40|338] "degF" Vector__XXX
+ SG_ FuelTemp : 8|8@1+ (1.8,-40) [-40|338] "degF" Vector__XXX
+
+BO_ 419357952 EHR: 8 Vector__XXX
+ SG_ EngineHours : 0|32@1+ (0.05,0) [0|214748364.75] "hr" Vector__XXX
+
+BO_ 419348736 HRVD: 8 Vector__XXX
+ SG_ Odometer : 0|32@1+ (0.003106855961,0) [0|13339498] "mi" Vector__XXX
+
+BO_ 419362304 IC1: 8 Vector__XXX
+ SG_ BoostPressure : 8|8@1+ (0.145038,0) [0|36.98] "psi_abs" Vector__XXX
+
+BO_ 419360512 OilPressure: 8 Vector__XXX
+ SG_ OilPressure : 24|8@1+ (0.580152,0) [0|145.04] "psi" Vector__XXX
+
+BO_ 419362609 Voltage: 8 Vector__XXX
+ SG_ DashVolts : 32|16@1+ (0.05,0) [0|3276.75] "V" Vector__XXX
+
+BO_ 419343921 AirPressure: 8 Vector__XXX
+ SG_ PrimaryAir : 16|8@1+ (1.160304,0) [0|295.9] "psi" Vector__XXX
+ SG_ SecondaryAir : 24|8@1+ (1.160304,0) [0|295.9] "psi" Vector__XXX
+
+BO_ 419363889 FuelTanks: 8 Vector__XXX
+ SG_ FuelTank1_Left : 8|8@1+ (0.4,0) [0|100] "%" Vector__XXX
+ SG_ FuelTank2_Right : 48|8@1+ (0.4,0) [0|100] "%" Vector__XXX
+
+BO_ 419362097 Ambient: 8 Vector__XXX
+ SG_ AmbientTemp : 24|16@1+ (0.05625,-459.4) [-459.4|1384.48] "degF" Vector__XXX
+
+
+CM_ BO_ 217056256 "PGN 61444: Electronic Engine Controller 1";
+CM_ SG_ 217056256 DriverDemandTorque "SPN 512";
+CM_ SG_ 217056256 ActualEngTorque "SPN 513";
+CM_ SG_ 217056256 EngineSpeed "SPN 190";
+CM_ SG_ 217056256 EngDemandTorque "SPN 2432";
+CM_ BO_ 217056000 "PGN 61443: Electronic Engine Controller 2";
+CM_ SG_ 217056000 EngineLoad "SPN 92";
+CM_ BO_ 419361024 "PGN 65265: Cruise Control / Vehicle Speed";
+CM_ SG_ 419361024 VehicleSpeed "SPN 84";
+CM_ BO_ 419361280 "PGN 65266: Fuel Economy (Liquid)";
+CM_ SG_ 419361280 FuelRate "SPN 183";
+CM_ BO_ 419360256 "PGN 65262: Engine Temperature 1";
+CM_ SG_ 419360256 CoolantTemp "SPN 110";
+CM_ SG_ 419360256 FuelTemp "SPN 174";
+CM_ BO_ 419357952 "PGN 65253: Engine Hours / Revolutions";
+CM_ SG_ 419357952 EngineHours "SPN 247";
+CM_ BO_ 419348736 "PGN 65217: HRVD Odometer (Engine ECU SA 0x00)";
+CM_ SG_ 419348736 Odometer "SPN 245 — full precision scale";
+CM_ BO_ 419362304 "PGN 65270: Intake / Exhaust Conditions 1";
+CM_ SG_ 419362304 BoostPressure "SPN 102 — gauge = value − 14.7";
+CM_ BO_ 419360512 "PGN 65263: Engine Oil Pressure — RPM-dependent";
+CM_ SG_ 419360512 OilPressure "SPN 100 — 4 kPa × 0.145038";
+CM_ BO_ 419362609 "PGN 65271: Electrical System Voltage — BCM (SA 0x31)";
+CM_ SG_ 419362609 DashVolts "SPN 158 — 16-bit LE, 0.05 V/bit";
+CM_ BO_ 419343921 "PGN 65198: Air Pressure — BCM (SA 0x31)";
+CM_ SG_ 419343921 PrimaryAir "8 kPa × 0.145038";
+CM_ SG_ 419343921 SecondaryAir "8 kPa × 0.145038";
+CM_ BO_ 419363889 "PGN 65276: Fuel Tank Levels — BCM (SA 0x31)";
+CM_ SG_ 419363889 FuelTank1_Left "SPN 96 — 130 gal; gal = % × 1.3";
+CM_ SG_ 419363889 FuelTank2_Right "SPN 38 — 130 gal; equalizing crossover";
+CM_ BO_ 419362097 "PGN 65269: Ambient Conditions — BCM (SA 0x31)";
+CM_ SG_ 419362097 AmbientTemp "SPN 171 — 0.03125C/bit; 0x244D=63F matching dash 64F";
+
+BA_DEF_ SG_  "SPN" INT 0 524287;
+BA_DEF_ BO_  "VFrameFormat" ENUM  "StandardCAN","ExtendedCAN","reserved","J1939PG";
+BA_DEF_  "ProtocolType" STRING ;
+BA_DEF_  "BusType" STRING ;
+
+BA_DEF_DEF_  "SPN" 0;
+BA_DEF_DEF_  "VFrameFormat" "J1939PG";
+BA_DEF_DEF_  "ProtocolType" "J1939";
+BA_DEF_DEF_  "BusType" "CAN";
+
+BA_ "ProtocolType" "J1939";
+BA_ "BusType" "CAN";
+
+BA_ "VFrameFormat" BO_ 217056256 3;
+BA_ "VFrameFormat" BO_ 217056000 3;
+BA_ "VFrameFormat" BO_ 419361024 3;
+BA_ "VFrameFormat" BO_ 419361280 3;
+BA_ "VFrameFormat" BO_ 419360256 3;
+BA_ "VFrameFormat" BO_ 419357952 3;
+BA_ "VFrameFormat" BO_ 419348736 3;
+BA_ "VFrameFormat" BO_ 419362304 3;
+BA_ "VFrameFormat" BO_ 419360512 3;
+BA_ "VFrameFormat" BO_ 419362609 3;
+BA_ "VFrameFormat" BO_ 419343921 3;
+BA_ "VFrameFormat" BO_ 419363889 3;
+BA_ "VFrameFormat" BO_ 419362097 3;
