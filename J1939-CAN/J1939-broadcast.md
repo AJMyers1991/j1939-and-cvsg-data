@@ -1,604 +1,384 @@
-# J1939 Diagnostic Bus — 2015 Kenworth T660 (Cat C15)
-
-## System identification
-
-The J1939 CAN bus is a SAE-standard heavy-duty vehicle network operating at 250 kbps. On this 2015 Kenworth T660 with Caterpillar C15 engine, the bus is accessed through the standard 9-pin Deutsch diagnostic connector located under the dash near the steering column.
-
-The observed bus carries data from four source addresses:
-
-| SA | ECU | Type |
-|----|-----|------|
-| 0x00 | Engine ECU (Cat C15) | Broadcasts RPM, torque, temperatures, hours, odometer, boost, oil pressure, voltage |
-| 0x31 | Body Control Module (BCM / CECU) | Broadcasts fuel levels, air pressures, ambient temperature, voltage, trip data |
-| 0x0B | Brake System Controller | Broadcasts wheel speeds, brake switch status |
-| 0x0F | Retarder / Engine Brake | Broadcasts Jake brake status, static configuration |
-
-Messages use **@1 Motorola (big-endian) bit numbering** on the wire but most signal data is **little-endian within bytes**. The DBC files in this repository use the Motorola convention per the `canparse` crate used by the j1939logger tool.
+# Generic SAE J1939 Broadcast Reference
 
 ## Purpose and scope
 
-This document describes every J1939 PGN observed on this vehicle — which signals are confirmed against dash gauges, which are standard SAE broadcasts, and which are unconfirmed or OEM-specific.
+This document is a vehicle-independent reference for interpreting classic SAE J1939 traffic on heavy-duty vehicles. It covers:
 
-The capture methodology is:
+- CAN identifier and canonical PGN extraction.
+- PDU1 destination-specific and PDU2 broadcast addressing.
+- Source-address discovery and address claiming.
+- Broadcast, request-only, diagnostic, identification, acknowledgment, and transport-protocol PGNs.
+- Every standards-defined PGN and signal currently represented by this repository's J1939 documents and DBC files.
+- Safe passive-capture and narrowly scoped read-only request procedures.
+- Repository-specific DBC conventions.
 
-- **Passive read-only** — no messages are transmitted to the bus except J1939 PGN requests (0x18EAFFF9) for diagnostic interrogation.
-- **Live verification** — every confirmed signal was cross-checked against the dash gauge or known ground truth while the engine was running.
-- **Engine-off test** — a signal that does not change between engine-on and engine-off is a static configuration value, not a live gauge.
+A standardized PGN is **not guaranteed to be present on every vehicle**. Equipment, controller generation, OEM configuration, network segmentation, and gateway routing determine what is actually broadcast. Source addresses are preferred assignments rather than permanent proof of controller identity; always verify Address Claimed traffic and the observed payload.
 
-Signals are presented in imperial units (psi, °F, mph, miles, gallons/hour). Conversion from J1939 metric raw values is baked into every scaling equation.
+This is not a substitute for the licensed SAE J1939 Digital Annex (`J1939DA`). The Digital Annex remains authoritative for the complete PGN/SPN catalog, revisions, ranges, enumerations, repetition rates, and reserved values.
 
-## Connection hardware
+Vehicle-specific observations for the truck used to develop this repository are maintained separately in [`2015-Kenworth-T660-Glider.md`](2015-Kenworth-T660-Glider.md).
 
-Capture was performed with a Noregon DLA+ 2.0 RP1210-compliant adapter (DeviceID=100) using `C:\Windows\System32\DLAUSB32.dll`. The adapter communicates over USB and provides read-only J1939 access with the following connection sequence:
+---
+
+## J1939 network fundamentals
+
+Classic J1939 normally uses:
+
+- Extended 29-bit CAN identifiers.
+- Classic CAN payloads of up to 8 bytes.
+- 250 kbit/s on many legacy heavy-duty vehicles.
+- 500 kbit/s on newer networks and some secondary networks.
+- Multi-packet transport when a parameter group exceeds 8 bytes.
+
+Bitrate must be established for the actual network. A vehicle may expose several physically separate CAN channels through one diagnostic connector.
+
+### 29-bit CAN identifier
 
 ```text
-1. ClientConnect(0, 100, "J1939", 0, 0, 0)   → ClientID
-2. SendCommand(19, cid, address_claim, 10)     → claim SA 0xF9
-3. SendCommand(16, cid, [1], 1)                → echo ON
-4. SendCommand(3, cid, [], 0)                  → all filters PASS
-5. ReadMessage() loop                          → non-blocking read
-6. ClientDisconnect(cid)
+Priority(3) | Reserved/EDP(1) | DP(1) | PF(8) | PS(8) | SA(8)
 ```
 
-Binary message format from `ReadMessage`:
+| Field | Meaning |
+|---|---|
+| Priority | Arbitration priority; lower numeric values win arbitration |
+| Reserved/EDP | Reserved or Extended Data Page, depending on J1939 generation |
+| DP | Data Page |
+| PF | PDU Format |
+| PS | Destination address for PDU1; group extension for PDU2 |
+| SA | Source Address |
 
-| Offset | Size | Description |
-|--------|------|-------------|
-| 0–3 | 4 | Timestamp (big-endian u32, milliseconds) |
-| 4 | 1 | Echo flag |
-| 5 | 1 | PGN byte 0 (LSB) |
-| 6 | 1 | PGN byte 1 |
-| 7 | 1 | PGN byte 2 (MSB) |
-| 8 | 1 | Priority + flags |
-| 9 | 1 | Source Address |
-| 10 | 1 | Destination / PS byte |
-| 11+ | var | Payload data |
+### Canonical PGN extraction
 
-PGN construction:
+```python
+# can_id is the 29-bit CAN identifier.
+pf = (can_id >> 16) & 0xFF
+ps = (can_id >> 8) & 0xFF
+raw_pgn = (can_id >> 8) & 0x3FFFF
+
+if pf < 0xF0:
+    # PDU1: PS is a destination address, not part of the PGN.
+    pgn = raw_pgn & 0x3FF00
+    destination_address = ps
+else:
+    # PDU2: PS is the group extension and is part of the PGN.
+    pgn = raw_pgn
+    destination_address = 0xFF
+
+source_address = can_id & 0xFF
+priority = (can_id >> 26) & 0x07
+```
+
+Never fold a PDU1 destination address into the canonical PGN. For example:
+
+| CAN ID | Canonical PGN | Destination | Source |
+|---|---:|---:|---:|
+| `0x18EAFFF9` | `0xEA00` Request | `0xFF` global | `0xF9` tool |
+| `0x18EA31F9` | `0xEA00` Request | `0x31` | `0xF9` tool |
+| `0x18DA00F9` | `0xDA00` diagnostic message | `0x00` | `0xF9` tool |
+| `0x0CF00400` | `0xF004` EEC1 | global/PDU2 | `0x00` |
+
+Destination-expanded values such as `0xEA31` can be useful for display, but protocol handlers must compare the canonical PGN `0xEA00` and keep destination `0x31` separate.
+
+---
+
+## Source addresses
+
+J1939 controllers claim addresses by transmitting PGN `0xEE00` with their 64-bit NAME. Preferred addresses provide useful clues, but live Address Claimed traffic is the authoritative network observation.
+
+Common preferred assignments include:
+
+| SA | Conventional assignment |
+|---:|---|
+| `0x00` | Engine #1 |
+| `0x03` | Transmission #1 |
+| `0x0B` | Brakes — System Controller |
+| `0x0F` | Retarder — Engine |
+| `0x17` | Instrument Cluster #1 |
+| `0x31` | Cab Controller — Primary |
+| `0xF9` | Off-board Diagnostic/Service Tool #1 |
+| `0xFE` | Null Address; not a usable claimed address |
+| `0xFF` | Global address; all/any node |
+
+Do not hard-code a controller role from SA alone when a controller can be self-configurable or when a gateway remaps traffic. Capture PGN `0xEE00`, decode NAME, and retain both SA and NAME in inventories.
+
+---
+
+## Broadcast, request-only, and destination-specific traffic
+
+### Broadcast PGNs
+
+Most cyclic application data uses PDU2 PGNs (`PF >= 0xF0`). The sender chooses a repetition rate appropriate to the parameter group. All nodes may receive the frame, but only equipped controllers populate supported SPNs.
+
+### Request-only PGNs
+
+Identification, configuration, and some historical/diagnostic PGNs are normally returned only after PGN `0xEA00` Request. A standard definition does not guarantee that every ECU supports a request or that a gateway forwards it.
+
+### Destination-specific PGNs
+
+PDU1 PGNs (`PF < 0xF0`) carry a destination in PS. Requests, acknowledgments, transport connection management, and many diagnostic protocols use destination-specific frames.
+
+---
+
+## Core network and transport PGNs
+
+| PGN (hex) | PGN (dec) | Label | Purpose | Typical behavior |
+|---:|---:|---|---|---|
+| `0xC700` | 50944 | ETP.DT | Extended Transport Protocol — Data Transfer | Numbered data packets for application messages larger than classic TP supports |
+| `0xC800` | 51200 | ETP.CM | Extended Transport Protocol — Connection Management | Extended-transport session management |
+| `0xE800` | 59392 | ACKM | Acknowledgment | ACK, NACK, access denied, or cannot respond to a requested PGN |
+| `0xEA00` | 59904 | RQST | Request | Requests one PGN; payload is the requested PGN in three-byte little-endian order |
+| `0xEB00` | 60160 | TP.DT | Transport Protocol — Data Transfer | Carries numbered seven-byte chunks of a multi-packet payload |
+| `0xEC00` | 60416 | TP.CM | Transport Protocol — Connection Management | BAM, RTS, CTS, End-of-Message ACK, or Abort |
+| `0xEE00` | 60928 | AC | Address Claimed | Advertises a controller's 64-bit NAME for an SA |
+| `0xEF00` | 61184 | PropA | Proprietary A | Destination-specific proprietary payload; meaning is OEM-defined |
+| `0xFED8` | 65240 | CA | Commanded Address | Commands a NAME to use an address; multi-packet and not a passive/read-only operation |
+| `0xFF00`–`0xFFFF` | 65280–65535 | PropB | Proprietary B | Broadcast proprietary PGNs; group extension identifies the OEM-defined PGN |
+
+### Request payload
+
+The Request PGN payload is always the requested PGN in least-significant-byte-first order:
 
 ```text
-pgn = (data[7] << 16) | (data[6] << 8) | data[5]
-da  = data[10]
-if pgn < 0xF000:
-    pgn = pgn | da   # PDU1: PS is destination-specific
-sa  = data[9]
+Request VIN PGN 0x00FEEC: EC FE 00
+Request Component Identification 0x00FEEB: EB FE 00
+Request Software Identification 0x00FEDA: DA FE 00
+Request Address Claimed 0x00EE00: 00 EE 00
 ```
 
-## CAN ID construction
+A diagnostic requester must claim a valid available source address before sending. The claimed SA and the SA in all Request and Transport Protocol control messages must match.
 
-J1939 29-bit CAN ID:
+### Transport Protocol controls
+
+| TP.CM control byte | Meaning |
+|---:|---|
+| `0x10` | Request To Send (RTS) |
+| `0x11` | Clear To Send (CTS) |
+| `0x13` | End-of-Message Acknowledgment |
+| `0x20` | Broadcast Announce Message (BAM) |
+| `0xFF` | Connection Abort |
+
+- **BAM:** global, sender paced, and does not use CTS.
+- **RTS/CTS:** destination-specific. The receiver must send correctly addressed CTS frames before TP.DT packets continue.
+- Associate each TP session with source, destination, transferred PGN, packet count, and total byte count. Do not concatenate unrelated TP.DT traffic.
+
+---
+
+## Standard diagnostic PGNs
+
+| PGN | Decimal | Label | Meaning | Read-only status |
+|---:|---:|---|---|---|
+| `0xFECA` | 65226 | DM1 | Active Diagnostic Trouble Codes | Normally broadcast; passive to receive |
+| `0xFECB` | 65227 | DM2 | Previously Active DTCs | Read-only request |
+| `0xFECC` | 65228 | DM3 | Clear/reset previously active DTCs | **Destructive; never send during read-only work** |
+| `0xFECD` | 65229 | DM4 | Freeze Frame Parameters | Read-only request |
+| `0xFECE` | 65230 | DM5 | Diagnostic Readiness 1 | Read-only |
+| `0xFECF` | 65231 | DM6 | Pending DTCs | Read-only |
+| `0xFED0` | 65232 | DM8 | Non-continuously monitored test results | Read-only response |
+| `0xFED1` | 65233 | DM9 | Oxygen sensor test results | Read-only |
+| `0xFED2` | 65234 | DM10 | Supported non-continuous test identifiers | Read-only |
+| `0xFED3` | 65235 | DM11 | Clear/reset active DTCs | **Destructive; never send during read-only work** |
+| `0xFED4` | 65236 | DM12 | Emissions-related active DTCs | Read-only |
+
+`0xFECC` is DM3. VIN is `0xFEEC`; the difference is material. The VIN request bytes are `EC FE 00`, not `CC FE 00`.
+
+---
+
+## Generic application PGN catalog used by this repository
+
+The following PGNs are standards-defined. They are vehicle-independent definitions, but broadcasting, source address, update rate, and populated SPNs remain implementation-dependent.
+
+| PGN | Decimal | Label | Standard purpose | Length/behavior |
+|---:|---:|---|---|---|
+| `0xF000` | 61440 | ERC1 | Electronic Retarder Controller 1 | 8-byte cyclic retarder command/status |
+| `0xF001` | 61441 | EBC1 | Electronic Brake Controller 1 | 8-byte cyclic brake/ABS status |
+| `0xF002` | 61442 | ETC1 | Electronic Transmission Controller 1 | 8-byte cyclic transmission control/status |
+| `0xF003` | 61443 | EEC2 | Electronic Engine Controller 2 | Engine load and related engine control data |
+| `0xF004` | 61444 | EEC1 | Electronic Engine Controller 1 | Engine torque mode, torque, and speed |
+| `0xFEAE` | 65198 | AIR1 | Air Supply Pressure | Pneumatic supply and service-brake circuit pressures |
+| `0xFEBD` | 65213 | FD1 | Fan Drive 1 | Estimated fan speed, drive state, fan speed, hydraulic pressure |
+| `0xFEBF` | 65215 | EBC2 | Wheel Speed Information | Front axle speed and relative wheel speeds |
+| `0xFEC1` | 65217 | VDHR | High Resolution Vehicle Distance | High-resolution total and trip distance |
+| `0xFECA` | 65226 | DM1 | Active Diagnostic Trouble Codes | Variable length; often cyclic and on change |
+| `0xFEDA` | 65242 | SOFT | Software Identification | Variable-length ASCII; normally on request |
+| `0xFEDF` | 65247 | EEC3 | Electronic Engine Controller 3 | Supplemental engine control data |
+| `0xFEE0` | 65248 | VD | Vehicle Distance | Standard-resolution total and trip distance |
+| `0xFEE1` | 65249 | RC | Retarder Configuration | Variable/multi-packet configuration data |
+| `0xFEE2` | 65250 | TCFG | Transmission Configuration | Variable/multi-packet configuration data |
+| `0xFEE3` | 65251 | EC1 | Engine Configuration 1 | Variable/multi-packet engine configuration |
+| `0xFEE4` | 65252 | SHUTDN | Shutdown | Engine protection and shutdown status |
+| `0xFEE5` | 65253 | HOURS | Engine Hours/Revolutions | Total engine hours and revolutions |
+| `0xFEE6` | 65254 | TD | Time/Date | Calendar and clock information |
+| `0xFEE7` | 65255 | VH | Vehicle Hours | Total vehicle hours |
+| `0xFEE8` | 65256 | VDS | Vehicle Direction/Speed | Direction and navigation-related speed data |
+| `0xFEE9` | 65257 | LFC | Fuel Consumption (Liquid) | Trip and total liquid-fuel consumption |
+| `0xFEEA` | 65258 | VW | Vehicle Weight | Axle and gross vehicle weight data |
+| `0xFEEB` | 65259 | CI | Component Identification | Make, model, serial number, and unit number; variable ASCII |
+| `0xFEEC` | 65260 | VI | Vehicle Identification | SPN 237 VIN; variable ASCII |
+| `0xFEED` | 65261 | CCSS | Cruise Control/Vehicle Speed Setup | Cruise and speed-limit configuration/status |
+| `0xFEEE` | 65262 | ET1 | Engine Temperature 1 | Coolant, fuel, oil, and related temperatures |
+| `0xFEEF` | 65263 | EFL/P1 | Engine Fluid Level/Pressure 1 | Fuel, oil, coolant pressure/level data |
+| `0xFEF0` | 65264 | PTO | Power Takeoff Information | PTO state, speed, and set-point information |
+| `0xFEF1` | 65265 | CCVS1 | Cruise Control/Vehicle Speed 1 | Wheel-based speed, brake/clutch/cruise status |
+| `0xFEF2` | 65266 | LFE1 | Fuel Economy (Liquid) | Fuel rate and fuel-economy data |
+| `0xFEF3` | 65267 | VP | Vehicle Position | Latitude and longitude |
+| `0xFEF4` | 65268 | TIRE | Tire Condition | Tire pressure/temperature/status |
+| `0xFEF5` | 65269 | AMB | Ambient Conditions | Barometric pressure and ambient temperatures |
+| `0xFEF6` | 65270 | IC1 | Intake/Exhaust Conditions 1 | Intake, manifold, filter, and exhaust parameters |
+| `0xFEF7` | 65271 | VEP1 | Vehicle Electrical Power 1 | Currents and electrical potentials |
+| `0xFEF8` | 65272 | TRF1 | Transmission Fluids 1 | Transmission pressure, level, and temperature |
+| `0xFEF9` | 65273 | AI | Axle Information | Axle weight/location information |
+| `0xFEFA` | 65274 | B | Brakes | Brake application/primary/secondary pressure and parking-brake status |
+| `0xFEFB` | 65275 | RF | Retarder Fluids | Retarder fluid level/pressure/temperature |
+| `0xFEFC` | 65276 | DD | Dash Display | Washer level, fuel levels, filter differential pressures, cargo temperature |
+
+---
+
+## Common generic signal decodes
+
+All byte positions below are **zero-based payload indices**. Multi-byte SPNs shown here are least-significant-byte first. Always confirm the current SAE definition and the actual controller payload before production use.
+
+| Signal | PGN | SPN | Payload byte(s) | Standard scale/offset |
+|---|---:|---:|---|---|
+| Driver demand engine torque | `0xF004` | 512 | `[1]` | `raw − 125 %` |
+| Actual engine torque | `0xF004` | 513 | `[2]` | `raw − 125 %` |
+| Engine speed | `0xF004` | 190 | `[3:5]` LE16 | `raw × 0.125 rpm` |
+| Engine percent load at current speed | `0xF003` | 92 | `[2]` | `raw × 1 %` |
+| Wheel-based vehicle speed | `0xFEF1` | 84 | `[1:3]` LE16 | `raw ÷ 256 km/h` |
+| Engine fuel rate | `0xFEF2` | 183 | `[0:2]` LE16 | `raw × 0.05 L/h` |
+| Coolant temperature | `0xFEEE` | 110 | `[0]` | `raw − 40 °C` |
+| Fuel temperature 1 | `0xFEEE` | 174 | `[1]` | `raw − 40 °C` |
+| Engine total hours | `0xFEE5` | 247 | `[0:4]` LE32 | `raw × 0.05 h` |
+| High-resolution total vehicle distance | `0xFEC1` | 917 | `[0:4]` LE32 | `raw × 5 m` |
+| High-resolution trip distance | `0xFEC1` | 918 | `[4:8]` LE32 | `raw × 5 m` |
+| Intake manifold pressure 1 | `0xFEF6` | 102 | `[1]` | `raw × 2 kPa absolute` |
+| Intake manifold temperature 1 | `0xFEF6` | 105 | `[2]` | `raw − 40 °C` |
+| Engine oil pressure | `0xFEEF` | 100 | `[3]` | `raw × 4 kPa` |
+| Battery potential / power input 1 | `0xFEF7` | 168 | `[4:6]` LE16 | `raw × 0.05 V` |
+| Keyswitch battery potential | `0xFEF7` | 158 | `[6:8]` LE16 | `raw × 0.05 V` |
+| Service brake circuit 1 air pressure | `0xFEAE` | 1087 | `[2]` | `raw × 8 kPa` |
+| Service brake circuit 2 air pressure | `0xFEAE` | 1088 | `[3]` | `raw × 8 kPa` |
+| Brake primary pressure | `0xFEFA` | 117 | `[1]` | `raw × 4 kPa` |
+| Brake secondary pressure | `0xFEFA` | 118 | `[2]` | `raw × 4 kPa` |
+| Fuel level 1 | `0xFEFC` | 96 | `[1]` | `raw × 0.4 %` |
+| Fuel level 2 | `0xFEFC` | 38 | `[6]` | `raw × 0.4 %` |
+| Ambient air temperature | `0xFEF5` | 171 | `[3:5]` LE16 | `raw × 0.03125 − 273 °C` |
+| Estimated percent fan speed | `0xFEBD` | 975 | `[0]` | `raw × 0.4 %` |
+| Front axle speed | `0xFEBF` | 904 | `[0:2]` LE16 | `raw ÷ 256 km/h` |
+| Relative wheel speeds | `0xFEBF` | 905–910 | `[2]`–`[7]` | `raw × 1/16 km/h − 7.8125 km/h` |
+
+### Imperial conversion factors used by this repository
+
+| Quantity | Repository conversion |
+|---|---|
+| Vehicle speed | `raw ÷ 256 × 0.621371 mph` |
+| Fuel rate | `raw × 0.05 × 0.264172 gal/h` |
+| Temperature, 8-bit `−40 °C` form | `raw × 1.8 − 40 °F` |
+| Temperature, 16-bit `0.03125 K` form | `raw × 0.05625 − 459.4 °F` |
+| Pressure at 1 kPa/bit | `raw × 0.145038 psi` |
+| Pressure at 2 kPa/bit | `raw × 0.290076 psi` |
+| Pressure at 4 kPa/bit | `raw × 0.580152 psi` |
+| Pressure at 8 kPa/bit | `raw × 1.160304 psi` |
+| High-resolution distance | `raw × 5 ÷ 1609.344 miles` |
+
+For high-resolution distance, retain at least the repository's literal:
 
 ```text
-Priority(3) | EDP(1) | DP(1) | PF(8) | PS(8) | SA(8)
+0.003106855961 miles/bit
 ```
 
-- PF < 240 (PDU1): PGN = `(DP << 16) | (PF << 8)`, PS = destination address
-- PF ≥ 240 (PDU2): PGN = `(DP << 16) | (PF << 8) | PS`, PS = group extension
-
-**Examples from this vehicle:**
-
-| CAN ID | Priority | PGN | SA | Signal |
-|--------|----------|-----|----|--------|
-| 0x0CF00400 | 3 | 0xF004 (EEC1) | 0x00 | Engine speed, torque |
-| 0x18FEF100 | 6 | 0xFEF1 (CCVS) | 0x00 | Vehicle speed |
-| 0x18FEEE00 | 6 | 0xFEEE (ET1) | 0x00 | Coolant/fuel temperature |
-| 0x18FEAE31 | 6 | 0xFEAE (Air Press) | 0x31 | Primary/secondary air |
-| 0x18FEFC31 | 6 | 0xFEFC (Fuel) | 0x31 | Fuel tank levels |
+Rounding it to `0.003107` can create tens of miles of error when the raw counter is several hundred million.
 
 ---
 
-## Confirmed Signals — Engine ECU (SA 0x00)
+## Identification PGNs
 
-*All signals in this section are SAE J1939-71 standard. They work on **any** J1939-compliant diesel regardless of make or model — same PGN, same byte positions, same scaling.*
+| PGN | Request payload | Standard content |
+|---:|---|---|
+| `0xFDC5` ECU Identification Information | `C5 FD 00` | ECU part, serial, location, type, manufacturer, and hardware identifiers where supported by the applicable revision |
+| `0xFEDA` Software Identification | `DA FE 00` | Asterisk-delimited ASCII software identifiers |
+| `0xFEEB` Component Identification | `EB FE 00` | SPN 586 Make, SPN 587 Model, SPN 588 Serial Number, SPN 233 Unit Number |
+| `0xFEEC` Vehicle Identification | `EC FE 00` | SPN 237 VIN, normally ASCII and up to 17 VIN characters |
 
-### Engine Speed (RPM)
+A valid road-vehicle VIN contains exactly 17 characters from:
 
-| | |
-|---|---|
-| **PGN** | 0xF004 (61444) — EEC1 |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 3–4, little-endian 16-bit |
-| **SPN** | 190 |
-| **Scale** | `raw × 0.125 rpm` |
-| **DBC** | `24|16@1+ (0.125,0)` |
-| **Notes** | Idle ~600–680 rpm. Universal — works on every J1939 diesel. |
+```text
+A-H, J-N, P, R-Z, 0-9
+```
 
-### Driver Demand Torque
-
-| | |
-|---|---|
-| **PGN** | 0xF004 (61444) — EEC1 |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 1 |
-| **SPN** | 512 |
-| **Scale** | `(raw − 125) %` |
-| **DBC** | `8|8@1+ (1,-125)` |
-| **Notes** | Idle = 0%. Tracks accelerator pedal. Shared PGN with RPM and Actual Torque. |
-
-### Actual Engine Torque
-
-| | |
-|---|---|
-| **PGN** | 0xF004 (61444) — EEC1 |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 2 |
-| **SPN** | 513 |
-| **Scale** | `(raw − 125) %` |
-| **DBC** | `16|8@1+ (1,-125)` |
-| **Notes** | Idle ~20–30% at low idle. Rises with load. Shared PGN with RPM and Demand Torque. |
-
-### Engine Load
-
-| | |
-|---|---|
-| **PGN** | 0xF003 (61443) — EEC2 |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 2 |
-| **SPN** | 92 |
-| **Scale** | `raw × 1 %` |
-| **DBC** | `16|8@1+ (1,0)` |
-| **Notes** | Percent of available torque at current RPM. Idle ~20%. |
-
-### Vehicle Speed
-
-| | |
-|---|---|
-| **PGN** | 0xFEF1 (65265) — CCVS |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 1–2, little-endian 16-bit |
-| **SPN** | 84 |
-| **Scale** | `raw ÷ 256 × 0.621371 mph` |
-| **DBC** | `8|16@1+ (0.002427,0)` |
-| **Notes** | Raw value = km/h × 256. Start bit is **8** — the template default of 24 reads a different field. BCM mirrors on SA 0x31. |
-
-### Fuel Rate
-
-| | |
-|---|---|
-| **PGN** | 0xFEF2 (65266) — LFE |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 0 |
-| **SPN** | 183 |
-| **Scale** | `raw × 0.05 × 0.264172 gal/h` |
-| **DBC** | `0|8@1+ (0.013208571,0)` |
-| **Notes** | Raw units are L/h at 0.05 L/h/bit. Idle ~0.65 gal/h. BCM mirrors on SA 0x31. |
-
-### Coolant Temperature
-
-| | |
-|---|---|
-| **PGN** | 0xFEEE (65262) — ET1 |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 0 |
-| **SPN** | 110 |
-| **Scale** | `(raw − 40) × 1.8 °F` |
-| **DBC** | `0|8@1+ (1.8,-40)` |
-| **Notes** | J1939 raw = °C with −40°C offset. Shared PGN with Fuel Temp. |
-
-### Fuel Temperature
-
-| | |
-|---|---|
-| **PGN** | 0xFEEE (65262) — ET1 |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 1 |
-| **SPN** | 174 |
-| **Scale** | `(raw − 40) × 1.8 °F` |
-| **DBC** | `8|8@1+ (1.8,-40)` |
-| **Notes** | Same scaling as coolant. Runs 10–30°F above ambient. Shared PGN with Coolant Temp. |
-
-### Engine Hours
-
-| | |
-|---|---|
-| **PGN** | 0xFEE5 (65253) — EHR |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 0–3, little-endian 32-bit |
-| **SPN** | 247 |
-| **Scale** | `raw × 0.05 hours` |
-| **DBC** | `0|32@1+ (0.05,0)` |
-| **Notes** | Ground truth: 35,512.9 h (live capture). Matches dash hourmeter. |
-
-### Odometer
-
-| | |
-|---|---|
-| **PGN** | 0xFEC1 (65217) — HRVD |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 0–3, little-endian 32-bit |
-| **SPN** | 245 |
-| **Scale** | `(raw × 5) ÷ 1609.344 miles` |
-| **DBC** | `0|32@1+ (0.003106855961,0)` |
-| **Notes** | Raw units are meters at 5 m/bit. **Scale precision is critical** — rounding to 6 decimal places (0.003107) introduces a 53-mile error at 1.15M miles. Use full-precision `5/1609.344 = 0.003106855961...`. Ground truth: 1,151,296 mi (verified 2026-08-23). BCM mirrors on SA 0x31 at ~0.2 mi offset. |
-
-### Boost Pressure
-
-| | |
-|---|---|
-| **PGN** | 0xFEF6 (65270) — IC1 |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 2 |
-| **SPN** | 102 |
-| **Scale** | `raw × 0.145038 psi (absolute)` |
-| **DBC** | `8|8@1+ (0.145038,0)` |
-| **Notes** | Raw is kPa absolute at 1 kPa/bit. Gauge pressure = raw − 101 kPa (≈14.7 psi). Idle ~80 kPa abs (vacuum at gauge). Rises under load. |
-
-### Battery / System Voltage
-
-| | |
-|---|---|
-| **PGN** | 0xFEF7 (65271) — Electrical System Voltage |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 4–5, little-endian 16-bit |
-| **SPN** | 158 |
-| **Scale** | `raw × 0.05 V` |
-| **DBC** | `32|16@1+ (0.05,0)` |
-| **Notes** | Engine ECU broadcasts voltage at SA 0x00 — this is standard per SAE and works on most platforms. BCM mirrors at SA 0x31 with nearly identical values. Verified via engine-off test: drops from ~14.2 V running to ~12.5 V off — confirms this is a live measurement, not a static config. |
+The letters `I`, `O`, and `Q` are excluded. Remove only documented delimiters, padding, or terminators. Do not mislabel an engine serial number, ECM Product ID, component unit number, or cached application record as a chassis VIN.
 
 ---
 
-## Confirmed Signals — BCM (SA 0x31)
+## Passive and active read safety
 
-*These signals are broadcast by the PACCAR/Kenworth Body Control Module. The PGNs and SPN scalings are SAE-standard, but the **source address 0x31 is PACCAR-specific**. Other OEMs may broadcast the same PGNs from different SAs (0x23, 0x17, or 0x0B).*
+### Passive capture
 
-### Oil Pressure ⚠️ Cat C15 Specific
+A passive recorder:
 
-| | |
-|---|---|
-| **PGN** | 0xFEEF (65263) — EFL/P2 |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 3 |
-| **SPN** | 100 |
-| **Scale** | `raw × 4 × 0.145038 psi` |
-| **DBC** | `24|8@1+ (0.580152,0)` |
-| **Notes** | **⚠️ Cat C15 exception:** Standard SPN 100 is byte 3 (0-indexed). On this Cat C15, byte 3 reads 0xFF (not populated). Cat places oil pressure at **byte 4** — the `kenworth_custom.dbc` / `j1939-paccar.dbc` uses byte 4 with the same scaling. Byte 4 is proprietary Cat behavior and may not work on other engine makes. Verified: 35.4 psi at idle (0x3D), 59.8 psi at 964 RPM (0x67), 66.7 psi at 1258 RPM (0x73). |
+- Connects and reads without calling `RP1210_SendMessage`.
+- Does not claim to be passive if it sends requests, acknowledgments, flow control, or diagnostic services.
+- May configure local adapter filters and receive formatting, provided those commands do not generate vehicle-bus messages.
 
-**⚠️ Correction history:** Oil pressure was initially misidentified at 0xFEE4 byte 2 (stuck at 0x3F = 36.5 psi regardless of RPM). The engine-off/engine-running test exposed it as a static config value, not a live signal.
+### Active read-only request
 
-### Primary Air Pressure
+An active identification read still transmits. Use these controls:
 
-| | |
-|---|---|
-| **PGN** | 0xFEAE (65198) — Air Pressure |
-| **SA** | 0x31 (BCM) |
-| **Byte(s)** | 2 |
-| **SPN** | 47 |
-| **Scale** | `raw × 8 × 0.145038 psi` |
-| **DBC** | `16|8@1+ (1.160304,0)` |
-| **Notes** | Raw is kPa at 8 kPa/bit. Primary = rear air tank. ~126 psi with compressor running (0x6D). Matched dash air gauge primary needle. |
+1. Confirm the correct physical channel, protocol, and bitrate passively.
+2. Confirm the intended tester SA is unused.
+3. Claim that SA with a valid J1939 NAME.
+4. Send exactly one allowlisted request.
+5. Wait through a complete response/timeout window.
+6. Send only the minimum CTS/EOM control required for a matching directed TP response.
+7. Disconnect cleanly.
 
-### Secondary Air Pressure
-
-| | |
-|---|---|
-| **PGN** | 0xFEAE (65198) — Air Pressure |
-| **SA** | 0x31 (BCM) |
-| **Byte(s)** | 3 |
-| **SPN** | 48 |
-| **Scale** | `raw × 8 × 0.145038 psi` |
-| **DBC** | `24|8@1+ (1.160304,0)` |
-| **Notes** | Same PGN and scaling as primary. Secondary = front air tank. Shared PGN with Primary Air. Matched dash air gauge secondary needle. |
-
-### Fuel Tank 1 (Left)
-
-| | |
-|---|---|
-| **PGN** | 0xFEFC (65276) — Fuel Tanks |
-| **SA** | 0x31 (BCM) |
-| **Byte(s)** | 1 |
-| **SPN** | 96 |
-| **Scale** | `raw × 0.4 %` |
-| **DBC** | `8|8@1+ (0.4,0)` |
-| **Notes** | 0–100%. 130 US gallon saddle tank. Gallons = percent × 1.3. Tanks share equalizing crossover — levels balance over time. |
-
-### Fuel Tank 2 (Right)
-
-| | |
-|---|---|
-| **PGN** | 0xFEFC (65276) — Fuel Tanks |
-| **SA** | 0x31 (BCM) |
-| **Byte(s)** | 6 |
-| **SPN** | 38 |
-| **Scale** | `raw × 0.4 %` |
-| **DBC** | `48|8@1+ (0.4,0)` |
-| **Notes** | Same scaling and tank size as Tank 1. Equalizing crossover line — tank 2 level change without driving is fuel equalization between tanks, not consumption. |
-
-### Ambient Air Temperature
-
-| | |
-|---|---|
-| **PGN** | 0xFEF5 (65269) — Ambient Conditions |
-| **SA** | 0x31 (BCM) |
-| **Byte(s)** | 3–4, little-endian 16-bit |
-| **SPN** | 171 |
-| **Scale** | `(raw × 0.03125 − 273) × 9/5 + 32 °F` |
-| **DBC** | `24|16@1+ (0.05625,-459.4)` |
-| **Notes** | Standard SPN 171 at 0.03125°C/bit, −273°C offset. Verified 2026-08-23: live decode 63°F matching dash 64°F (within 1°F gauge tolerance). Shares PGN 0xFEF5 — bytes 0–2 are FF (not populated — barometric pressure absent on this truck). |
-
-### BCM Reference Voltage
-
-| | |
-|---|---|
-| **PGN** | 0xFEF8 (65272) — Battery Voltage |
-| **SA** | 0x31 (BCM) |
-| **Byte(s)** | 5 |
-| **Scale** | `raw × 0.05 V` |
-| **Notes** | 12.55 V steady — BCM internal reference. NOT the dash voltmeter (which is 0xFEF7). Does not change with engine state. Lower resolution than dash gauge (single byte at 0.05 V/bit). |
+Never send programming, calibration, security-access, reset, actuator-control, DTC-clear, DM3, or DM11 operations during read-only work.
 
 ---
 
-## Request-Only PGNs
+## Data-quality rules
 
-*Some PGNs are not broadcast spontaneously and must be explicitly requested by sending a J1939 PGN request to CAN ID 0x18EAFFF9 (PGN 0x00EA00, global destination 0xFF) with a 3-byte little-endian target PGN as the data payload.*
-
-### VIN — Not Available on This Vehicle
-
-| | |
-|---|---|
-| **Request PGN** | 0x00FEEC (65260) |
-| **Request Data** | `EC FE 00` |
-| **SPN** | 237 |
-| **Response** | None / NACK |
-| **Notes** | The standard J1939 VIN request was attempted with multiple source addresses (0xF9, 0x20) and both global and targeted addressing. The engine ECU either NACKs (PGN not supported) or remains silent. Multi-frame Transport Protocol (TP.CM on 0xEC00, TP.DT on 0xEB00) was monitored — no response. The Cat C15 on this Kenworth likely requires Cat ET proprietary protocol for VIN retrieval. |
-
-### Barometric Pressure — Not Populated
-
-| | |
-|---|---|
-| **Request PGN** | 0x00FEF5 (65269) |
-| **Request Data** | `F5 FE 00` |
-| **SPN** | 108 |
-| **Response** | None |
-| **Notes** | SPN 108 (0.5 kPa/bit) at byte 0 of PGN 0xFEF5 is 0xFF on both engine ECU and BCM. Sensor not installed on this vehicle. |
+- A byte value of all ones commonly represents not available, error, or reserved states, but the exact range depends on the SPN length and definition.
+- Do not decode `0xFF` as a valid 255-unit measurement unless the SPN explicitly permits it.
+- Correlation is not identification. Validate dynamic signals through controlled state changes.
+- Compare engine-running and engine-off states to distinguish live measurements from configuration constants.
+- Validate source address and payload independently; the same PGN may be emitted by several controllers.
+- Do not concatenate unrelated frames merely because they share a PGN.
+- Treat proprietary A/B payloads as unknown until reproducibly decoded or documented by the OEM.
 
 ---
 
-## Unconfirmed PGNs
+## Repository-specific DBC conventions
 
-*Seen on the J1939 bus but not yet verified against a physical gauge, known value, or dash readout.*
+These are requirements of this repository's `j1939logger`/`canparse` pipeline, not universal on-wire J1939 rules:
 
-### EEC3 — Desired Engine Speed & Friction Torque
+1. Use `@1` signal notation because the current parser expects it. In standard DBC syntax, `@1` denotes Intel/little-endian signal encoding; it does not describe CAN wire serialization.
+2. Use decimal scale literals, never fraction expressions.
+3. Use actual observed CAN identifiers with real source addresses; the logger does not treat SA `0xFE` as a wildcard.
+4. Bake imperial conversion into scale and offset.
+5. Keep the odometer factor at `0.003106855961` miles/bit.
+6. Keep PDU1 destination separate from the canonical PGN in application code.
 
-| | |
-|---|---|
-| **PGN** | 0xFEDF (65247) |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 2–3 (Desired Speed, LE16), 1 (NomFrictionTorque) |
-| **Scale** | `raw × 0.125 rpm` / `(raw − 125) %` |
-| **Notes** | Supplemental engine controller data. Not independently verified. |
-
-### FEBD — Unknown 96%
-
-| | |
-|---|---|
-| **PGN** | 0xFEBD (65213) |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 2 |
-| **Scale** | `raw × 0.4 %` |
-| **Notes** | Sits at 0xF0–0xF1 (96.0–96.4%) in all captures. Purpose unknown — this truck has no aftertreatment, so this may be a vestigial broadcast or a configuration constant. |
-
-### BCM Data 1 — Slow-Changing Value + Constant
-
-| | |
-|---|---|
-| **PGN** | 0xFEF5 (65269) |
-| **SA** | 0x31 (BCM) |
-| **Byte(s)** | 3 (slow value), 5 (constant 0x26 = 38) |
-| **Notes** | Byte 3 drifts between captures (29→10→18.5 at 0.5 scale tentative). Byte 5 is always 0x26. Not amperage. Purpose unknown. Shares PGN with Ambient Temperature (bytes 4–5). |
-
-### BCM Counter — Short Duration
-
-| | |
-|---|---|
-| **PGN** | 0xFEF7 (65271) |
-| **SA** | 0x31 (BCM) |
-| **Byte(s)** | 5–6, little-endian 16-bit |
-| **Notes** | 279 raw units in one log, 283–290 in another. Possibly trip hours, idle timer, or PTO counter. Not engine hours. |
-
-### BCM Hi-Res Air — Duplicate Air Pressure
-
-| | |
-|---|---|
-| **PGN** | 0xFEFA (65274) |
-| **SA** | 0x31 (BCM) |
-| **Byte(s)** | 2–3, little-endian 16-bit |
-| **Scale** | `raw × 4 × 0.145038 psi` |
-| **Notes** | Same data as 0xFEAE but at 4 kPa/bit (double resolution). Redundant broadcast — use 0xFEAE unless higher precision is needed. |
-
-### Trip Data — 18-Byte Burst
-
-| | |
-|---|---|
-| **PGN** | 0xFECA (65226) |
-| **SA** | 0x31 (BCM) |
-| **Byte(s)** | 1–18 (structured container) |
-| **Notes** | Contains 4 repeating entries with `03 7E` prefix. Likely encodes trip fuel, trip distance, trip hours. Ground truth trip odometer at time of testing: 6,019.9 mi — believed to be encoded in this frame but the scale has not been confirmed. |
-
-### EBC1 — Brake Pedal Switch
-
-| | |
-|---|---|
-| **PGN** | 0xF001 (61441) |
-| **SA** | 0x0B (Brake ECU), also mirrored by 0x31 (BCM) |
-| **Byte(s)** | 0, bits 0–1 |
-| **Scale** | Enum (0 = off, 1 = applied) |
-| **Notes** | Not verified against brake lights or pedal feel. |
-
-### EBC2 — Engine Brake Status
-
-| | |
-|---|---|
-| **PGN** | 0xF000 (61440) |
-| **SA** | 0x0F (Retarder / Engine Brake) |
-| **Byte(s)** | 0, bits 0–3 |
-| **Scale** | Enum |
-| **Notes** | Jake brake / engine compression brake status. Not verified. |
-
-### Wheel Speed Sensors
-
-| | |
-|---|---|
-| **PGN** | 0xFEBF (65215) |
-| **SA** | 0x0B (Brake ECU) |
-| **Byte(s)** | 2–5 (4 channels, 1 byte each) |
-| **Scale** | `(raw − 125)` — raw offset, not scaled to mph |
-| **Notes** | All channels read 0x7D (125 = zero offset) at standstill. Axle 1 L/R and Axle 2 L/R. Scaling factor needed to convert to mph. |
-
-### VEP1 / VEP3 — Static Configuration Messages
-
-| | |
-|---|---|
-| **PGN** | 0xFEE1 (65249) / 0xFEE3 (65251) |
-| **SA** | 0x0F / 0x00 |
-| **Notes** | 19-byte and 32-byte static configuration containers. Constant across all captures. No dynamic data — safe to ignore for monitoring. |
-
-### 0xFEE4 Byte 2 — Stuck Sensor (Not Oil Pressure)
-
-| | |
-|---|---|
-| **PGN** | 0xFEE4 (65252) — EFL/P1 |
-| **SA** | 0x00 (Engine ECU) |
-| **Byte(s)** | 2 |
-| **Scale** | `raw × 4 × 0.145038 psi` |
-| **Notes** | **⚠️ Previously misidentified as Oil Pressure.** Stuck at 0x3F (36.5 psi) regardless of engine RPM — does not change at idle, high idle, or under load. Real oil pressure is at 0xFEEF byte 4. Likely a configuration constant or unpopulated sensor. |
+Other DBC tools may use different start-bit and byte-order conventions. CAN itself does not have a universal `@0`/`@1` annotation; that syntax belongs to DBC interpretation.
 
 ---
 
-## Generic vs PACCAR-Specific Signals
+## Repository file map
 
-### Truly Universal — Works on Any J1939 Diesel
-
-These engine ECU (SA 0x00) signals are defined by SAE J1939-71 and broadcast identically on every J1939-compliant diesel engine regardless of make:
-
-| Signal | PGN | SPN | Scale |
-|--------|-----|-----|-------|
-| Engine Speed | 0xF004 | 190 | 0.125 rpm/bit |
-| Driver Demand Torque | 0xF004 | 512 | 1%/bit, −125 offset |
-| Actual Engine Torque | 0xF004 | 513 | 1%/bit, −125 offset |
-| Engine Load | 0xF003 | 92 | 1%/bit |
-| Vehicle Speed | 0xFEF1 | 84 | 1/256 km/h/bit |
-| Fuel Rate | 0xFEF2 | 183 | 0.05 L/h/bit |
-| Coolant Temperature | 0xFEEE | 110 | 1°C/bit, −40°C offset |
-| Fuel Temperature | 0xFEEE | 174 | 1°C/bit, −40°C offset |
-| Engine Hours | 0xFEE5 | 247 | 0.05 h/bit |
-| Odometer | 0xFEC1 | 245 | 5 m/bit |
-| Boost Pressure | 0xFEF6 | 102 | 1 kPa/bit |
-| Battery Voltage | 0xFEF7 | 158 | 0.05 V/bit |
-
-The `j1939-generic.dbc` file in this repository contains only these universal signals and will work on any J1939 diesel truck.
-
-### PACCAR/Kenworth-Specific (SA 0x31 BCM)
-
-These signals use SAE-standard PGNs and SPN scalings but the specific **source address 0x31** is PACCAR's BCM implementation. Other OEMs may broadcast the same data from different SAs:
-
-| Signal | PGN | SA 0x31 | Other Possible SA |
-|--------|-----|---------|-------------------|
-| Primary Air Pressure | 0xFEAE | Kenworth BCM | 0x0B Brake Controller |
-| Secondary Air Pressure | 0xFEAE | Kenworth BCM | 0x0B Brake Controller |
-| Fuel Level 1 | 0xFEFC | Kenworth BCM | 0x23 Cab Controller, 0x17 Instrument Cluster |
-| Fuel Level 2 | 0xFEFC | Kenworth BCM | 0x23 Cab Controller, 0x17 Instrument Cluster |
-| Ambient Temperature | 0xFEF5 | Kenworth BCM | 0x17 Instrument Cluster, 0x23 Cab Controller |
-| Dash Voltage | 0xFEF7 | Kenworth BCM | 0x00 Engine ECU (same PGN, different SA) |
-
-### Cat C15 Specific
-
-- **Oil pressure** at 0xFEEF byte 4 instead of standard byte 3. The standard SPN 100 byte 3 reads 0xFF on this engine.
-
-The `j1939-paccar.dbc` file in this repository contains everything — universal signals, PACCAR SA 0x31 signals, and the Cat-specific oil pressure byte position.
+| File | Purpose |
+|---|---|
+| [`../dbc-files/j1939-generic.dbc`](../dbc-files/j1939-generic.dbc) | Generic engine/network signal subset used by this repository |
+| [`2015-Kenworth-T660-Glider.md`](2015-Kenworth-T660-Glider.md) | Vehicle-specific connection, observed PGNs, deviations, and test results |
+| [`../dbc-files/Paccar-Kenworth-Peterbilt/j1939-paccar.dbc`](../dbc-files/Paccar-Kenworth-Peterbilt/j1939-paccar.dbc) | PACCAR/Kenworth-specific DBC |
+| [`../Paccar-CVSG/CVSG.md`](../Paccar-CVSG/CVSG.md) | Kenworth CVSG auxiliary gauge network |
 
 ---
 
-## Off-Bus Signals
+## Reference authority
 
-*These signals run directly from the sensor to the BCM, then over the CVSG private gauge bus to the Kenworth Smart Gauges. **They do not appear on the J1939 diagnostic bus** and cannot be read through the 9-pin connector.*
+Use this document as a practical repository guide. For design, compliance, or production diagnostics, verify against the applicable editions of:
 
-| Signal | Path |
-|--------|------|
-| **Ammeter (Amps)** | Alternator current sensor → BCM → CVSG CAN → Dash |
-| **Front Drive Axle Temperature** | Sensor → BCM → CVSG CAN → Dash |
-| **Rear Drive Axle Temperature** | Sensor → BCM → CVSG CAN → Dash |
-| **Suspension Pressure** | Sensor → BCM → CVSG CAN → Dash |
-| **Air Filter Restriction** | Sensor → BCM → CVSG CAN → Dash (CVSG ID 0x20) |
-| **Fuel Filter Restriction** | Not populated on this truck (no sensor) |
-
-See `CVSG/CVSG.md` for the CVSG gauge bus protocol, addressing, and scaling for these signals.
-
----
-
-## Validation Methodology
-
-### Engine-Off Test
-
-The most reliable way to distinguish a live signal from a static configuration value:
-
-1. Connect and read the bus with the engine running.
-2. Note the candidate signal's value.
-3. Turn off the engine, leave the ignition on.
-4. Re-read the bus.
-5. If the value **changed** with engine state → live signal.
-6. If the value **stayed the same** → static config or unpopulated sensor.
-
-**Signals caught by this test:**
-
-| PGN | Byte | Engine On | Engine Off | Verdict |
-|-----|------|-----------|------------|---------|
-| 0xFEF0 | 5 | 14.0 V | 14.0 V | ✗ STATIC — not dash voltmeter |
-| 0xFEE4 | 1 | 36.5 psi | 36.5 psi | ✗ STATIC — not oil pressure |
-| 0xFEF7 | 4–5 (LE16) | 14.2 V | 12.5 V | ✓ LIVE — dash voltmeter confirmed |
-| 0xFEEF | 3 | 35–67 psi | 0 psi | ✓ LIVE — oil pressure confirmed |
-
-### Scale Precision
-
-Scales that combine multiple conversion factors need sufficient decimal precision, especially for large raw values:
-
-- **Odometer**: `5 / 1609.344 = 0.003106855961...` — rounding to 0.003107 introduces a 53-mile error at 370 million raw units (1.15M miles). Always use full precision.
-- **DBC**: Never use fraction notation (`1/8`, `1/256`) — many parsers silently treat these as `1`. Always use decimal values (`0.125`, `0.00390625`).
-
-### DBC Bit Numbering
-
-The `canparse` crate used by the j1939logger tool expects **@1 (Motorola)** bit numbering. Using @0 (Intel) produces correct values in Vector tools but garbled values in the logger. Always use `@1+` or `@1-` for signal definitions.
-
-### DBC CAN ID Source Addresses
-
-The j1939logger matches messages by masking priority bits (`id & 0x3FFFFFF`) but matches **SA exactly**. Template-style CAN IDs with SA=0xFE (wildcard placeholder) will never match real messages. Always use the actual SA from the bus: `0x00` for engine ECU, `0x31` for BCM.
-
----
-
-## Repository File Map
-
-| File | Description |
-|------|-------------|
-| `dbc-files/j1939-generic.dbc` | Universal J1939 signals — engine ECU SA 0x00 only. Works on any diesel truck. |
-| `dbc-files/Paccar-Kenworth-Peterbilt/j1939-paccar.dbc` | Full PACCAR DBC — all universal + BCM SA 0x31 + Cat C15 oil pressure. |
-| `J1939-CAN/J1939-broadcast.md` | This document. |
-| `CVSG/CVSG.md` | CVSG auxiliary gauge bus protocol and signal map. |
-
----
-
-## Current Confidence Summary
-
-Confirmed with live dash-gauge verification and engine-off tests:
-
-- All 12 universal engine ECU signals — RPM, torque, load, speed, fuel rate, temperatures, hours, odometer, boost, voltage.
-- All 5 BCM body signals — primary/secondary air, fuel tanks 1/2, ambient temperature.
-- Oil pressure at 0xFEEF byte 4 (Cat C15 specific).
-- Two static config values identified and excluded: 0xFEF0 (charging system config) and 0xFEE4 byte 2.
-- Odometer scale precision confirmed at 5/1609.344 with 12+ decimal places.
-- DBC bit numbering convention (@1 Motorola) and decimal-scale requirement confirmed for j1939logger compatibility.
-
-Still unresolved or requiring physical cross-checking:
-
-- Trip data PGN 0xFECA — structure identified but individual field scaling not confirmed.
-- BCM Data 1 (0xFEF5 bytes 3 and 5) — purpose unknown.
-- BCM Counter (0xFEF7 bytes 5–6) — likely trip timer, unconfirmed.
-- VIN retrieval — standard J1939 request NACKed; likely requires Cat ET.
-- Barometric pressure — sensor not installed on this vehicle.
-- FEBD 96% signal — purpose unknown.
-- Wheel speed sensor scaling to mph.
-
----
-
-*Vehicle: 2015 Kenworth T660, Caterpillar C15 (no aftertreatment), J1939 250k baud, 9-pin diagnostic.*  
-*Fuel tanks: 130 US gallons each, equalizing crossover line.*  
-*Capture hardware: Noregon DLA+ 2.0 RP1210 adapter (DeviceID=100).*  
-*Last verified: 2026-08-23 — live captures with engine running.*
+- SAE J1939 Digital Annex — official PGN/SPN assignments.
+- SAE J1939-21 — classic data-link layer and Transport Protocol.
+- SAE J1939-81 — network management and address claiming.
+- SAE J1939-73 — diagnostics.
+- SAE J1939-71 — vehicle application-layer definitions where applicable.
