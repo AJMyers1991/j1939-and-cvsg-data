@@ -1,0 +1,33 @@
+Sigrok Windows runtime
+======================
+
+Source:
+https://sigrok.org/download/binary/sigrok-cli/sigrok-cli-NIGHTLY-x86_64-release-installer.exe
+
+Downloaded SHA-256:
+0d92d56aa55821a172401e436f1fb4773108430c11903822ac1d4a23fb105ae2
+
+Bundled version:
+sigrok-cli 0.8.0-git-f44dd91
+libsigrok 0.6.0-git-883c2ac
+
+Relevant firmware:
+tools\sigrok\share\sigrok-firmware\fx2lafw-saleae-logic.fw
+
+Minimal portable runtime:
+- tools\sigrok\sigrok-cli.exe
+- tools\sigrok\python34.dll
+- tools\sigrok\COPYING
+- tools\sigrok\share\sigrok-firmware\fx2lafw-saleae-logic.fw
+
+The upstream installer was used only to obtain the runtime. Its installer
+registration and Start Menu shortcuts were removed with the official
+uninstaller. Protocol decoders, unrelated firmware, bundled Python modules,
+and Zadig utilities were intentionally omitted because this monitor requests
+raw binary samples and performs CVSG decoding itself.
+
+License:
+tools\sigrok\COPYING
+
+The runtime is distributed under its upstream licenses. This file records the
+exact source used to make the monitor directory reproducible and auditable.
