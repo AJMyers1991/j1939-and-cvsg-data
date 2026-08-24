@@ -1,9 +1,10 @@
 #!/usr/bin/env python
-"""Continuous PACCAR/Kenworth CVSG gauge monitor using sigrok/fx2lafw.
+"""Continuous PACCAR/Kenworth CVSG gauge monitor using native USB acquisition.
 
-The bundled sigrok-cli process acquires all eight digital channels continuously
-from a Saleae Logic-compatible FX2 analyzer. Channel 0 is decoded in real time;
-no Logic 2 process, segmented captures, exports, or CSV files are involved.
+A bundled modern libusb runtime loads the open-source FX2LAFW firmware into the
+Saleae Logic-compatible analyzer's volatile RAM and continuously acquires all
+eight digital channels. Channel 0 is decoded in real time; no Logic 2 process,
+segmented captures, exports, CSV files, or external Sigrok process are involved.
 
 Run start-cvsg-monitor.cmd on Windows. Press any key to stop cleanly.
 """
@@ -12,12 +13,10 @@ from __future__ import annotations
 
 import argparse
 import os
-import signal
-import subprocess
+import queue
 import sys
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,15 +24,38 @@ from typing import Callable, Iterable, Optional
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-SIGROK_DIR = SCRIPT_DIR / "tools" / "sigrok"
-SIGROK_EXE = SIGROK_DIR / "sigrok-cli.exe"
-FIRMWARE_PATH = SIGROK_DIR / "share" / "sigrok-firmware" / "fx2lafw-saleae-logic.fw"
+USB_RUNTIME_DIR = SCRIPT_DIR / "tools" / "usb1"
+USB_DLL_PATH = USB_RUNTIME_DIR / "libusb-1.0.dll"
+FIRMWARE_PATH = SCRIPT_DIR / "tools" / "fx2lafw-saleae-logic.fw"
 LOG_PATH = SCRIPT_DIR / "cvsg.log"
+
+# Keep the third-party USB wrapper private to this portable package.
+if str(USB_RUNTIME_DIR.parent) not in sys.path:
+    sys.path.insert(0, str(USB_RUNTIME_DIR.parent))
+try:
+    import usb1
+except (ImportError, OSError) as exc:  # Reported clearly by ensure_runtime_files().
+    usb1 = None  # type: ignore[assignment]
+    USB_IMPORT_ERROR: Optional[BaseException] = exc
+else:
+    USB_IMPORT_ERROR = None
+
+USB_VENDOR_ID = 0x0925
+USB_PRODUCT_ID = 0x3881
+USB_INTERFACE = 0
+USB_ENDPOINT_IN = 0x82
+USB_CONFIGURATION = 1
+FX2_CPUCS_ADDRESS = 0xE600
+FX2_FIRMWARE_CHUNK_SIZE = 4096
+FX2_REENUMERATION_TIMEOUT_SECONDS = 5.0
+TRANSFER_SIZE = 10_240
+TRANSFER_COUNT = 32
+TRANSFER_TIMEOUT_MS = 625
+SAMPLE_QUEUE_CAPACITY = 256
 
 CHANNEL = 0
 CHANNEL_MASK = 1 << CHANNEL
 SAMPLE_RATE = 1_000_000
-SAMPLE_RATE_ARGUMENT = "1m"
 INVALID_PAYLOAD = 0xF830
 DISPLAY_INTERVAL_SECONDS = 0.10
 STARTUP_TIMEOUT_SECONDS = 20.0
@@ -189,7 +211,7 @@ class SampleStreamDecoder:
         self.rejected_periods = 0
 
     def feed(self, data: bytes) -> None:
-        """Consume one raw binary block from sigrok-cli."""
+        """Consume one raw binary block from the USB analyzer."""
         self.samples_seen += len(data)
 
         for sample in data:
@@ -263,113 +285,309 @@ class MonitorRuntime:
         self.sample_decoder.feed(data)
 
 
-class SigrokStream:
-    """Manage a persistent sigrok-cli binary stream and diagnostics."""
+class Fx2UsbStream:
+    """Acquire continuous FX2LAFW samples through bundled modern libusb."""
 
     def __init__(self, runtime: MonitorRuntime) -> None:
         self.runtime = runtime
-        self.process: Optional[subprocess.Popen[bytes]] = None
         self.stop_event = threading.Event()
-        self.stdout_thread: Optional[threading.Thread] = None
-        self.stderr_thread: Optional[threading.Thread] = None
-        self.stderr_lines: deque[str] = deque(maxlen=80)
+        self.sample_queue: queue.Queue[Optional[bytes]] = queue.Queue(
+            maxsize=SAMPLE_QUEUE_CAPACITY
+        )
+        self.context = None
+        self.handle = None
+        self.interface_claimed = False
+        self.transfers: list[object] = []
+        self.event_thread: Optional[threading.Thread] = None
+        self.decoder_thread: Optional[threading.Thread] = None
         self.reader_error: Optional[str] = None
+        self.empty_transfer_count = 0
+
+    @staticmethod
+    def _request_type_out() -> int:
+        assert usb1 is not None
+        return usb1.TYPE_VENDOR | usb1.RECIPIENT_DEVICE | usb1.ENDPOINT_OUT
+
+    @staticmethod
+    def _request_type_in() -> int:
+        assert usb1 is not None
+        return usb1.TYPE_VENDOR | usb1.RECIPIENT_DEVICE | usb1.ENDPOINT_IN
+
+    def _matching_devices(self) -> list[object]:
+        assert self.context is not None
+        return [
+            device
+            for device in self.context.getDeviceList(skip_on_error=True)
+            if device.getVendorID() == USB_VENDOR_ID
+            and device.getProductID() == USB_PRODUCT_ID
+        ]
+
+    def _upload_firmware(self) -> None:
+        matching = self._matching_devices()
+        if not matching:
+            raise RuntimeError(
+                "Saleae Logic-compatible analyzer 0925:3881 was not found. "
+                "Confirm it is connected and Logic 2 is closed."
+            )
+
+        handle = matching[0].open()
+        try:
+            handle.setConfiguration(USB_CONFIGURATION)
+            handle.controlWrite(
+                self._request_type_out(),
+                0xA0,
+                FX2_CPUCS_ADDRESS,
+                0,
+                b"\x01",
+                timeout=1000,
+            )
+            firmware = FIRMWARE_PATH.read_bytes()
+            for offset in range(0, len(firmware), FX2_FIRMWARE_CHUNK_SIZE):
+                chunk = firmware[offset : offset + FX2_FIRMWARE_CHUNK_SIZE]
+                written = handle.controlWrite(
+                    self._request_type_out(),
+                    0xA0,
+                    offset,
+                    0,
+                    chunk,
+                    timeout=1000,
+                )
+                if written != len(chunk):
+                    raise RuntimeError(
+                        f"Short FX2 firmware write at byte {offset}: "
+                        f"{written}/{len(chunk)}"
+                    )
+            handle.controlWrite(
+                self._request_type_out(),
+                0xA0,
+                FX2_CPUCS_ADDRESS,
+                0,
+                b"\x00",
+                timeout=1000,
+            )
+        finally:
+            handle.close()
+
+    def _open_loaded_firmware(self) -> tuple[object, bytes, int]:
+        assert usb1 is not None
+        deadline = time.monotonic() + FX2_REENUMERATION_TIMEOUT_SECONDS
+        last_error: Optional[BaseException] = None
+        while time.monotonic() < deadline:
+            time.sleep(0.10)
+            for device in self._matching_devices():
+                candidate = None
+                try:
+                    candidate = device.open()
+                    version = bytes(
+                        candidate.controlRead(
+                            self._request_type_in(), 0xB0, 0, 0, 2, timeout=1000
+                        )
+                    )
+                    if len(version) != 2 or version[0] != 1:
+                        candidate.close()
+                        continue
+                    revision_data = bytes(
+                        candidate.controlRead(
+                            self._request_type_in(), 0xB2, 0, 0, 1, timeout=1000
+                        )
+                    )
+                    revision = revision_data[0] if revision_data else -1
+                    return candidate, version, revision
+                except usb1.USBError as exc:
+                    last_error = exc
+                    if candidate is not None:
+                        candidate.close()
+
+        suffix = f" Last USB error: {last_error}" if last_error else ""
+        raise RuntimeError(
+            "FX2LAFW firmware did not re-enumerate within "
+            f"{FX2_REENUMERATION_TIMEOUT_SECONDS:.0f} seconds.{suffix}"
+        )
+
+    def _set_reader_error(self, message: str) -> None:
+        if self.reader_error is None:
+            self.reader_error = message
+        self.stop_event.set()
+
+    def _on_transfer(self, transfer: object) -> None:
+        """Copy one completed transfer, immediately resubmit it, then queue data."""
+        assert usb1 is not None
+        try:
+            status = transfer.getStatus()
+            if status in (usb1.TRANSFER_COMPLETED, usb1.TRANSFER_TIMED_OUT):
+                actual_length = transfer.getActualLength()
+                data = (
+                    bytes(transfer.getBuffer()[:actual_length])
+                    if actual_length > 0
+                    else b""
+                )
+                if data:
+                    self.empty_transfer_count = 0
+                else:
+                    self.empty_transfer_count += 1
+                    if self.empty_transfer_count > TRANSFER_COUNT * 2:
+                        self._set_reader_error(
+                            "The FX2 analyzer stopped returning sample data."
+                        )
+                        return
+
+                if not self.stop_event.is_set():
+                    transfer.submit()
+                if data:
+                    try:
+                        self.sample_queue.put_nowait(data)
+                    except queue.Full:
+                        self._set_reader_error(
+                            "The CVSG decoder could not keep up with the USB sample stream."
+                        )
+                return
+
+            if status == usb1.TRANSFER_CANCELLED and self.stop_event.is_set():
+                return
+            self._set_reader_error(f"USB sample transfer failed with status {status}.")
+        except Exception as exc:
+            self._set_reader_error(f"USB transfer callback failed: {exc}")
+
+    def _decode_samples(self) -> None:
+        try:
+            while True:
+                block = self.sample_queue.get()
+                if block is None:
+                    return
+                self.runtime.feed(block)
+        except Exception as exc:
+            self._set_reader_error(f"Sample decoder failed: {exc}")
+
+    def _handle_usb_events(self) -> None:
+        assert self.context is not None
+        assert usb1 is not None
+        try:
+            while not self.stop_event.is_set():
+                self.context.handleEventsTimeout(0.10)
+        except Exception as exc:
+            self._set_reader_error(f"USB event loop failed: {exc}")
+        finally:
+            for transfer in self.transfers:
+                try:
+                    if transfer.isSubmitted():
+                        transfer.cancel()
+                except usb1.USBError:
+                    pass
+
+            deadline = time.monotonic() + 2.0
+            while (
+                any(transfer.isSubmitted() for transfer in self.transfers)
+                and time.monotonic() < deadline
+            ):
+                try:
+                    self.context.handleEventsTimeout(0.05)
+                except usb1.USBError:
+                    break
+
+            while True:
+                try:
+                    self.sample_queue.put(None, timeout=0.10)
+                    break
+                except queue.Full:
+                    if self.decoder_thread is None or not self.decoder_thread.is_alive():
+                        break
 
     def start(self) -> None:
         ensure_runtime_files()
-        environment = os.environ.copy()
-        environment["PATH"] = str(SIGROK_DIR) + os.pathsep + environment.get("PATH", "")
-
-        command = [
-            str(SIGROK_EXE),
-            "--driver",
-            "fx2lafw",
-            "--config",
-            f"samplerate={SAMPLE_RATE_ARGUMENT}",
-            "--continuous",
-            "--output-format",
-            "binary",
-        ]
-        creation_flags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
-
-        self.process = subprocess.Popen(
-            command,
-            cwd=SIGROK_DIR,
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-            creationflags=creation_flags,
-        )
-        self.stdout_thread = threading.Thread(target=self._read_stdout, name="sigrok-data", daemon=True)
-        self.stderr_thread = threading.Thread(target=self._read_stderr, name="sigrok-errors", daemon=True)
-        self.stdout_thread.start()
-        self.stderr_thread.start()
-
-    def _read_stdout(self) -> None:
-        assert self.process is not None and self.process.stdout is not None
+        assert usb1 is not None
+        self.context = usb1.USBContext()
         try:
-            while not self.stop_event.is_set():
-                block = self.process.stdout.read(65_536)
-                if not block:
-                    break
-                self.runtime.feed(block)
-        except Exception as exc:  # Preserve reader failure for the main thread.
-            self.reader_error = str(exc)
+            self._upload_firmware()
+            self.handle, version, revision = self._open_loaded_firmware()
+            self.handle.claimInterface(USB_INTERFACE)
+            self.interface_claimed = True
 
-    def _read_stderr(self) -> None:
-        assert self.process is not None and self.process.stderr is not None
-        try:
-            for raw_line in iter(self.process.stderr.readline, b""):
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if line:
-                    self.stderr_lines.append(line)
-        except Exception as exc:
-            self.stderr_lines.append(f"Could not read sigrok diagnostics: {exc}")
+            self.decoder_thread = threading.Thread(
+                target=self._decode_samples, name="cvsg-decoder", daemon=True
+            )
+            self.decoder_thread.start()
+
+            self.transfers = []
+            for _ in range(TRANSFER_COUNT):
+                transfer = self.handle.getTransfer()
+                transfer.setBulk(
+                    USB_ENDPOINT_IN,
+                    TRANSFER_SIZE,
+                    callback=self._on_transfer,
+                    timeout=TRANSFER_TIMEOUT_MS,
+                )
+                transfer.submit()
+                self.transfers.append(transfer)
+
+            self.event_thread = threading.Thread(
+                target=self._handle_usb_events, name="fx2-usb-events", daemon=True
+            )
+            self.event_thread.start()
+
+            # 48 MHz / (47 + 1) = 1 MHz. Flag 0x40 selects 48 MHz and
+            # zero in the width bit selects one byte per eight-channel sample.
+            start_command = bytes((0x40, 0x00, 0x2F))
+            written = self.handle.controlWrite(
+                self._request_type_out(),
+                0xB1,
+                0,
+                0,
+                start_command,
+                timeout=1000,
+            )
+            if written != len(start_command):
+                raise RuntimeError(
+                    f"Short FX2 acquisition command: {written}/{len(start_command)}"
+                )
+            self.firmware_version = f"{version[0]}.{version[1]}"
+            self.fx2_revision = revision
+        except Exception:
+            self.stop()
+            raise
 
     def diagnostic_text(self) -> str:
-        return "\n".join(self.stderr_lines)
+        return self.reader_error or "No additional USB diagnostic text was returned."
+
+    def is_alive(self) -> bool:
+        return self.event_thread is not None and self.event_thread.is_alive()
 
     def stop(self) -> None:
         self.stop_event.set()
-        process = self.process
-        if process is None:
-            return
+        if self.event_thread is not None:
+            self.event_thread.join(timeout=3.0)
+        if self.decoder_thread is not None:
+            self.decoder_thread.join(timeout=3.0)
 
-        if process.poll() is None:
-            try:
-                if os.name == "nt":
-                    process.send_signal(signal.CTRL_BREAK_EVENT)
-                else:
-                    process.send_signal(signal.SIGINT)
-                process.wait(timeout=2.0)
-            except (OSError, subprocess.TimeoutExpired):
-                process.terminate()
+        if self.handle is not None:
+            if self.interface_claimed:
                 try:
-                    process.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=2.0)
-
-        for pipe in (process.stdout, process.stderr):
-            if pipe is not None:
-                try:
-                    pipe.close()
-                except OSError:
+                    self.handle.releaseInterface(USB_INTERFACE)
+                except Exception:
                     pass
-
-        for thread in (self.stdout_thread, self.stderr_thread):
-            if thread is not None:
-                thread.join(timeout=1.0)
+            self.handle.close()
+            self.handle = None
+            self.interface_claimed = False
+        if self.context is not None:
+            self.context.close()
+            self.context = None
 
 
 def ensure_runtime_files() -> None:
     """Reject incomplete copies with clear, actionable messages."""
-    missing = [path for path in (SIGROK_EXE, FIRMWARE_PATH) if not path.is_file()]
+    required = (
+        USB_RUNTIME_DIR / "__init__.py",
+        USB_DLL_PATH,
+        FIRMWARE_PATH,
+        USB_RUNTIME_DIR / "licenses" / "COPYING.LESSER",
+    )
+    missing = [path for path in required if not path.is_file()]
     if missing:
         missing_text = "\n".join(f"  {path}" for path in missing)
-        raise FileNotFoundError(f"The bundled Sigrok runtime is incomplete. Missing:\n{missing_text}")
+        raise FileNotFoundError(
+            f"The bundled USB runtime is incomplete. Missing:\n{missing_text}"
+        )
+    if USB_IMPORT_ERROR is not None or usb1 is None:
+        raise RuntimeError(f"Could not load the bundled USB runtime: {USB_IMPORT_ERROR}")
 
 
 def enable_ansi_console() -> None:
@@ -536,28 +754,20 @@ def run_self_test() -> int:
 def run_diagnostics() -> int:
     """Check the packaged runtime without opening the analyzer."""
     ensure_runtime_files()
-    environment = os.environ.copy()
-    environment["PATH"] = str(SIGROK_DIR) + os.pathsep + environment.get("PATH", "")
-    result = subprocess.run(
-        [str(SIGROK_EXE), "--version"],
-        cwd=SIGROK_DIR,
-        env=environment,
-        capture_output=True,
-        text=True,
-        timeout=15,
-        check=False,
+    assert usb1 is not None
+    version = usb1.getVersion()
+    print(f"Python USB wrapper: usb1 {usb1.__version__}")
+    print(
+        "Runtime: libusb "
+        f"{version.major}.{version.minor}.{version.micro}.{version.nano}"
     )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"sigrok-cli exited with {result.returncode}")
-    first_line = result.stdout.splitlines()[0] if result.stdout else "sigrok-cli version unavailable"
-    print(f"Runtime: {first_line}")
     print(f"Firmware: {FIRMWARE_PATH}")
     print("Packaged runtime diagnostics passed; analyzer was not opened.")
     return 0
 
 
-def wait_for_initial_samples(stream: SigrokStream, runtime: MonitorRuntime) -> None:
-    """Wait for acquisition or fail with Sigrok's concrete diagnostic output."""
+def wait_for_initial_samples(stream: Fx2UsbStream, runtime: MonitorRuntime) -> None:
+    """Wait for acquisition or fail with concrete USB diagnostic output."""
     deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if key_pressed():
@@ -566,26 +776,28 @@ def wait_for_initial_samples(stream: SigrokStream, runtime: MonitorRuntime) -> N
             return
         if stream.reader_error:
             raise RuntimeError(f"Sample reader failed: {stream.reader_error}")
-        assert stream.process is not None
-        return_code = stream.process.poll()
-        if return_code is not None:
-            details = stream.diagnostic_text() or "No Sigrok diagnostic text was returned."
-            raise RuntimeError(f"sigrok-cli exited with code {return_code}.\n\n{details}")
+        if not stream.is_alive():
+            raise RuntimeError(
+                "The USB acquisition event loop stopped unexpectedly.\n\n"
+                + stream.diagnostic_text()
+            )
         time.sleep(0.05)
 
     details = stream.diagnostic_text()
-    suffix = f"\n\nSigrok diagnostics:\n{details}" if details else ""
-    raise TimeoutError(f"No samples arrived within {STARTUP_TIMEOUT_SECONDS:.0f} seconds.{suffix}")
+    raise TimeoutError(
+        f"No samples arrived within {STARTUP_TIMEOUT_SECONDS:.0f} seconds."
+        f"\n\nUSB diagnostics:\n{details}"
+    )
 
 
 def run_live_monitor() -> int:
     if os.name != "nt":
-        print("This live monitor requires Windows and the bundled Windows Sigrok runtime.")
+        print("This live monitor requires Windows and the bundled USB runtime.")
         return 1
 
     enable_ansi_console()
     runtime = MonitorRuntime()
-    stream = SigrokStream(runtime)
+    stream = Fx2UsbStream(runtime)
     started_at = datetime.now().astimezone()
     started_monotonic = time.monotonic()
     fatal_error: Optional[str] = None
@@ -604,11 +816,11 @@ def run_live_monitor() -> int:
                 break
             if stream.reader_error:
                 raise RuntimeError(f"Sample reader failed: {stream.reader_error}")
-            assert stream.process is not None
-            return_code = stream.process.poll()
-            if return_code is not None:
-                details = stream.diagnostic_text() or "No Sigrok diagnostic text was returned."
-                raise RuntimeError(f"sigrok-cli stopped unexpectedly with code {return_code}.\n\n{details}")
+            if not stream.is_alive():
+                raise RuntimeError(
+                    "USB acquisition stopped unexpectedly.\n\n"
+                    + stream.diagnostic_text()
+                )
 
             now = time.monotonic()
             if now >= next_display:

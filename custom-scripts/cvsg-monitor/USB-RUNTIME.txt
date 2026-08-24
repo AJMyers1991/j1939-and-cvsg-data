@@ -1,0 +1,42 @@
+CVSG monitor USB runtime
+========================
+
+Python wrapper
+--------------
+Name: libusb1 / usb1
+Version: 3.4.0
+Source: https://pypi.org/project/libusb1/3.4.0/
+Wheel: libusb1-3.4.0-py3-none-win_amd64.whl
+License files:
+- tools\usb1\licenses\COPYING
+- tools\usb1\licenses\COPYING.LESSER
+
+Native runtime
+--------------
+Name: libusb
+Bundled version reported at runtime: 1.0.29.11953
+Bundled file: tools\usb1\libusb-1.0.dll
+Upstream: https://github.com/libusb/libusb
+
+FX2 firmware
+------------
+Name: fx2lafw-saleae-logic.fw
+Bundled file: tools\fx2lafw-saleae-logic.fw
+Source project: https://github.com/sigrokproject/fx2lafw
+Firmware size: 8120 bytes
+
+The firmware is uploaded into volatile FX2 RAM at each monitor launch. It does
+not write the analyzer EEPROM, replace the Windows driver, or permanently flash
+the analyzer.
+
+Packaging
+---------
+The Python wrapper and DLL are bundled privately with this monitor. They are not
+installed system-wide and do not modify the remote computer's Python environment.
+The monitor retains the existing Saleae WinUSB driver.
+
+The prior sigrok-cli 0.8.0-git-f44dd91 Windows binary was removed because its
+statically linked libusb 1.0.20 returned LIBUSB_ERROR_NOT_SUPPORTED with the
+healthy Saleae WinUSB interface on the target Windows 10 computer. Modern libusb
+1.0.29 opened the same interface and completed firmware upload and acquisition
+without a driver change.
