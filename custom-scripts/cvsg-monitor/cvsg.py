@@ -607,8 +607,13 @@ def enable_ansi_console() -> None:
 
 
 def clear_console() -> None:
-    """Redraw in place without spawning `cls` ten times per second."""
+    """Clear the console for a new screen."""
     print("\033[2J\033[H", end="")
+
+
+def home_console() -> None:
+    """Return to the top for a stable in-place live-table redraw."""
+    print("\033[H", end="")
 
 
 def key_pressed() -> bool:
@@ -644,7 +649,7 @@ def display(runtime: MonitorRuntime, started: float) -> None:
         symbols = runtime.sample_decoder.valid_symbols
         rejected = runtime.sample_decoder.rejected_periods
 
-    clear_console()
+    home_console()
     print("PACCAR / Kenworth CVSG Live Gauge Monitor")
     print("=" * 91)
     print(f"Device: Saleae Logic-compatible FX2 (0925:3881) | Channel: {CHANNEL}")
