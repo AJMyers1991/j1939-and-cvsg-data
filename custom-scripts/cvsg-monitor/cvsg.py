@@ -608,12 +608,49 @@ def enable_ansi_console() -> None:
 
 def clear_console() -> None:
     """Clear the console for a new screen."""
-    print("\033[2J\033[H", end="")
+    print("\033[2J\033[H", end="", flush=True)
 
 
-def home_console() -> None:
-    """Return to the top for a stable in-place live-table redraw."""
-    print("\033[H", end="")
+class ConsoleDashboard:
+    """Maintain a fixed dashboard and rewrite only rows whose text changed."""
+
+    def __init__(self) -> None:
+        self.previous_lines: list[str] = []
+        self.initialized = False
+
+    def render(self, lines: list[str]) -> None:
+        if not self.initialized:
+            # Clear once, draw once, hide the cursor, and park it below the table.
+            output = "\033[2J\033[H\033[?25l" + "\n".join(lines)
+            output += f"\033[{len(lines) + 1};1H"
+            print(output, end="", flush=True)
+            self.previous_lines = lines
+            self.initialized = True
+            return
+
+        updates: list[str] = []
+        for row, line in enumerate(lines, start=1):
+            previous = self.previous_lines[row - 1] if row <= len(self.previous_lines) else None
+            if line != previous:
+                # Position directly on the changed row, replace it, and clear any
+                # characters left over from a formerly longer value.
+                updates.append(f"\033[{row};1H{line}\033[K")
+
+        if updates:
+            updates.append(f"\033[{len(lines) + 1};1H")
+            print("".join(updates), end="", flush=True)
+        self.previous_lines = lines
+
+    def close(self) -> None:
+        """Restore the cursor and place subsequent text below the dashboard."""
+        if not self.initialized:
+            return
+        print(
+            f"\033[{len(self.previous_lines) + 2};1H\033[?25h",
+            end="",
+            flush=True,
+        )
+        self.initialized = False
 
 
 def key_pressed() -> bool:
@@ -633,7 +670,11 @@ def format_value(state: GaugeState, value: Optional[float]) -> str:
     return f"{value:.{state.definition.precision}f} {state.definition.unit}"
 
 
-def display(runtime: MonitorRuntime, started: float) -> None:
+def display(
+    dashboard: ConsoleDashboard,
+    runtime: MonitorRuntime,
+    started: float,
+) -> None:
     with runtime.lock:
         rows = [
             (
@@ -649,23 +690,32 @@ def display(runtime: MonitorRuntime, started: float) -> None:
         symbols = runtime.sample_decoder.valid_symbols
         rejected = runtime.sample_decoder.rejected_periods
 
-    home_console()
-    print("PACCAR / Kenworth CVSG Live Gauge Monitor")
-    print("=" * 91)
-    print(f"Device: Saleae Logic-compatible FX2 (0925:3881) | Channel: {CHANNEL}")
-    print(f"Continuous sample rate: {SAMPLE_RATE:,} Sa/s | Data received: {samples / 1_000_000:.1f} MB")
-    print(
-        f"Session: {time.monotonic() - started:,.0f} seconds | "
-        f"Decoded frames: {frames:,} | Valid symbols: {symbols:,} | Rejected periods: {rejected:,}"
+    lines = [
+        "PACCAR / Kenworth CVSG Live Gauge Monitor",
+        "=" * 91,
+        f"Device: Saleae Logic-compatible FX2 (0925:3881) | Channel: {CHANNEL}",
+        f"Continuous sample rate: {SAMPLE_RATE:,} Sa/s | Data received: {samples / 1_000_000:.1f} MB",
+        (
+            f"Session: {time.monotonic() - started:,.0f} seconds | "
+            f"Decoded frames: {frames:,} | Valid symbols: {symbols:,} | "
+            f"Rejected periods: {rejected:,}"
+        ),
+        "Press any key to stop, release the analyzer, save cvsg.log, and close.",
+        "-" * 91,
+        f"{'Gauge':34} {'Value':17} {'Minimum':17} {'Maximum':17}",
+        "-" * 91,
+    ]
+    lines.extend(
+        f"{gauge.name:34} {current:17} {minimum:17} {maximum:17}"
+        for gauge, current, minimum, maximum in rows
     )
-    print("Press any key to stop, release the analyzer, save cvsg.log, and close.")
-    print("-" * 91)
-    print(f"{'Gauge':34} {'Value':17} {'Minimum':17} {'Maximum':17}")
-    print("-" * 91)
-    for gauge, current, minimum, maximum in rows:
-        print(f"{gauge.name:34} {current:17} {minimum:17} {maximum:17}")
-    print("-" * 91)
-    print("Restriction scales are inferred; manifold pressure may be absolute or gauge pressure.")
+    lines.extend(
+        (
+            "-" * 91,
+            "Restriction scales are inferred; manifold pressure may be absolute or gauge pressure.",
+        )
+    )
+    dashboard.render(lines)
 
 
 def write_session_log(
@@ -803,6 +853,7 @@ def run_live_monitor() -> int:
     enable_ansi_console()
     runtime = MonitorRuntime()
     stream = Fx2UsbStream(runtime)
+    dashboard = ConsoleDashboard()
     started_at = datetime.now().astimezone()
     started_monotonic = time.monotonic()
     fatal_error: Optional[str] = None
@@ -829,7 +880,7 @@ def run_live_monitor() -> int:
 
             now = time.monotonic()
             if now >= next_display:
-                display(runtime, started_monotonic)
+                display(dashboard, runtime, started_monotonic)
                 next_display = now + DISPLAY_INTERVAL_SECONDS
             time.sleep(0.02)
 
@@ -838,6 +889,7 @@ def run_live_monitor() -> int:
     except Exception as exc:
         fatal_error = str(exc)
     finally:
+        dashboard.close()
         stream.stop()
         ended_at = datetime.now().astimezone()
         try:

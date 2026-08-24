@@ -3,6 +3,9 @@ setlocal
 cd /d "%~dp0"
 set "CVSG_LAUNCHED_BY_CMD=1"
 
+rem Keep the 91-character dashboard from wrapping and breaking fixed row positions.
+mode con: cols=100 lines=40 >nul 2>&1
+
 echo Starting the PACCAR / Kenworth CVSG monitor...
 
 where python.exe >nul 2>&1
