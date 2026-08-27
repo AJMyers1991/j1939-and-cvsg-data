@@ -60,7 +60,7 @@ BO_ 419348736 HRVD: 8 Vector__XXX
  SG_ Odometer : 0|32@1+ (0.003106855961,0) [0|13339498] "mi" Vector__XXX
 
 BO_ 419362304 IC1: 8 Vector__XXX
- SG_ BoostPressure : 8|8@1+ (0.145038,0) [0|36.98] "psi_abs" Vector__XXX
+ SG_ BoostPressure : 8|8@1+ (0.290076,0) [0|73.97] "psi_abs" Vector__XXX
 
 BO_ 419360512 OilPressure: 8 Vector__XXX
  SG_ OilPressure : 24|8@1+ (0.580152,0) [0|145.04] "psi" Vector__XXX
@@ -99,7 +99,7 @@ CM_ SG_ 419357952 EngineHours "SPN 247";
 CM_ BO_ 419348736 "PGN 65217: HRVD Odometer (Engine ECU SA 0x00)";
 CM_ SG_ 419348736 Odometer "SPN 245 — full precision scale";
 CM_ BO_ 419362304 "PGN 65270: Intake / Exhaust Conditions 1";
-CM_ SG_ 419362304 BoostPressure "SPN 102 — gauge = value − 14.7";
+CM_ SG_ 419362304 BoostPressure "SPN 102 — 2 kPa/bit × 0.145038; gauge = value − 14.7";
 CM_ BO_ 419360512 "PGN 65263: Engine Oil Pressure — RPM-dependent";
 CM_ SG_ 419360512 OilPressure "SPN 100 — 4 kPa × 0.145038";
 CM_ BO_ 419362609 "PGN 65271: Electrical System Voltage — BCM (SA 0x31)";

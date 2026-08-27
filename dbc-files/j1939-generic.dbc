@@ -59,7 +59,7 @@ BO_ 419348736 HRVD: 8 Vector__XXX
  SG_ Odometer : 0|32@1+ (0.003106855961,0) [0|13339498] "mi" Vector__XXX
 
 BO_ 419362304 IC1: 8 Vector__XXX
- SG_ BoostPressure : 8|8@1+ (0.145038,0) [0|36.98469] "psi_abs" Vector__XXX
+ SG_ BoostPressure : 8|8@1+ (0.290076,0) [0|73.97] "psi_abs" Vector__XXX
 
 BO_ 419362560 Voltage: 8 Vector__XXX
  SG_ BatteryVoltage : 32|16@1+ (0.05,0) [0|3276.75] "V" Vector__XXX
@@ -82,7 +82,7 @@ CM_ SG_ 419357952 EngineHours "SPN 247 — 0.05 h/bit";
 CM_ BO_ 419348736 "PGN 65217: High Resolution Vehicle Distance";
 CM_ SG_ 419348736 Odometer "SPN 245 — 5 m/bit / 1609.344";
 CM_ BO_ 419362304 "PGN 65270: Intake / Exhaust Conditions 1";
-CM_ SG_ 419362304 BoostPressure "SPN 102 — 1 kPa/bit; gauge = value − 14.7";
+CM_ SG_ 419362304 BoostPressure "SPN 102 — 2 kPa/bit; gauge = value − 14.7";
 CM_ BO_ 419362560 "PGN 65271: Electrical System Voltage";
 CM_ SG_ 419362560 BatteryVoltage "SPN 158 — 16-bit LE, 0.05 V/bit";
 
